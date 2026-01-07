@@ -1,18 +1,3 @@
-# proxyserver.py
-# A simple FastAPI proxy that keeps your OathNet API key server-side.
-# Your tool calls THIS server, and this server calls OathNet.
-#
-# Install:
-#   python -m pip install fastapi uvicorn requests
-#
-# Run (PowerShell, from this folder):
-#   $env:OATHNET_API_KEY="YOUR_OATHNET_KEY"
-#   $env:APP_LICENSE_KEYS="vexzy-lic-1,vexzy-lic-2"
-#   python -m uvicorn proxyserver:app --host 0.0.0.0 --port 8080
-#
-# Test:
-#   http://localhost:8080/health
-
 import os
 import time
 from typing import Dict, Any, List
@@ -43,12 +28,10 @@ if not OATHNET_API_KEY:
 
 LICENSE_SET = {k.strip() for k in APP_LICENSE_KEYS.split(",") if k.strip()}
 if not LICENSE_SET:
-    # Safer to hard-fail than run open.
+    
     raise RuntimeError("Missing APP_LICENSE_KEYS environment variable (must contain at least 1 license key).")
 
-# ======================
-# Endpoint allowlist
-# ======================
+
 ALLOWLIST = {
     "/steam/",
     "/search/status/<uuid:search_id>/",
@@ -67,10 +50,8 @@ ALLOWLIST = {
 }
 
 
-# ======================
-# In-memory rate tracking
-# ======================
-_rate: Dict[str, List[float]] = {}  # {license: [timestamps]}
+
+_rate: Dict[str, List[float]] = {}  
 
 
 def _check_license(x_license: str) -> str:
@@ -96,7 +77,7 @@ def health():
 
 @app.get("/config")
 def config_info():
-    # Does NOT expose your OathNet key.
+    
     return {
         "ok": True,
         "base_url": OATHNET_BASE_URL,
@@ -107,11 +88,11 @@ def config_info():
 
 @app.post("/api/oathnet")
 def oathnet_proxy(payload: Dict[str, Any], x_license: str = Header(default="")):
-    # 1) Auth + rate limit
+    
     lic = _check_license(x_license)
     _rate_limit(lic)
 
-    # 2) Validate request
+    
     endpoint = payload.get("endpoint")
     params = payload.get("params", {})
 
@@ -126,7 +107,7 @@ def oathnet_proxy(payload: Dict[str, Any], x_license: str = Header(default="")):
     if not isinstance(params, dict):
         raise HTTPException(status_code=400, detail="params must be an object/dict")
 
-    # 3) Forward request to OathNet
+    
     url = f"{OATHNET_BASE_URL}{endpoint}"
 
     try:
@@ -139,9 +120,10 @@ def oathnet_proxy(payload: Dict[str, Any], x_license: str = Header(default="")):
     except requests.RequestException:
         raise HTTPException(status_code=502, detail="Upstream request failed")
 
-    # 4) Return response
+    
     try:
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
-        # Not JSON
+        
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
+

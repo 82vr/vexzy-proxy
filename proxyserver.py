@@ -36,10 +36,19 @@ BANNED_PAIRS = set()
 
 ALLOWLIST = {
     "/steam/",
-    "/roblox-userinfo/",
+    "/search/status/<uuid:search_id>/",
+    "/search-stealer/",
+    "/search-breach/",
+    "/extract-subdomain/",
     "/ip-info/",
     "/holehe/",
-    
+    "/ghunt/",
+    "/roblox-userinfo/",
+    "/discord-to-roblox/",
+    "/xbox/",
+    "/mc-history/",
+    "/discord-userinfo/",
+    "/discord-username-history/",
 }
 
 
@@ -265,3 +274,4 @@ def oathnet_proxy(
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
+

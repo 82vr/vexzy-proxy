@@ -146,6 +146,14 @@ def auth_verify(x_license: str = Header(default=""), x_user: str = Header(defaul
     
     return {"ok": True, "user": user, "license": lic}
 
+@app.post("/debug/headers")
+def debug_headers(request: Request):
+    # TEMP: remove later
+    return {
+        "ok": True,
+        "headers": {k.lower(): v for k, v in request.headers.items()}
+    }
+
 
 @app.get("/admin/status")
 def admin_status(x_admin_key: str = Header(default="")):
@@ -292,3 +300,4 @@ def oathnet_proxy(
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
+

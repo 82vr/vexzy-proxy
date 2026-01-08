@@ -7,7 +7,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Vexzy Proxy", version="2.1.0")
+app = FastAPI(title="Vexzy Proxy", version="2.2.0")
 
 
 OATHNET_API_KEY = os.getenv("OATHNET_API_KEY")
@@ -27,14 +27,15 @@ STARTUP_LICENSES = {k.strip() for k in APP_LICENSE_KEYS.split(",") if k.strip()}
 if not STARTUP_LICENSES:
     raise RuntimeError("Missing APP_LICENSE_KEYS environment variable (must contain at least 1 license key).")
 
-
 ACTIVE_LICENSES = set(STARTUP_LICENSES)
-BANNED_USERS = set()       
-BANNED_LICENSES = set()   
-BANNED_PAIRS = set()       
+BANNED_USERS = set()
+BANNED_LICENSES = set()
+BANNED_PAIRS = set() 
+
+USAGE_LOG = deque(maxlen=500)
 
 
-USAGE_LOG = deque(maxlen=500) 
+_rate: Dict[Tuple[str, str], List[float]] = {}
 
 
 ALLOWLIST = {
@@ -56,19 +57,16 @@ ALLOWLIST = {
 }
 
 
-_rate: Dict[Tuple[str, str], List[float]] = {}
-
-
 def _require_admin(x_admin_key: str) -> None:
     if x_admin_key != ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized admin")
-
 
 def _validate_username(username: str) -> str:
     u = (username or "").strip()
     if len(u) < 3 or len(u) > 24:
         raise HTTPException(status_code=401, detail="Username must be 3–24 characters")
 
+ 
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
     if any(c not in allowed for c in u):
         raise HTTPException(
@@ -77,25 +75,31 @@ def _validate_username(username: str) -> str:
         )
     return u
 
-
-def _check_auth(x_license: str, x_user: str) -> Tuple[str, str]:
-    if not x_license:
+def _auth_or_401(x_license: str, x_user: str) -> Tuple[str, str]:
+    """
+    Single source of truth for auth rules.
+    Used by /auth/verify and /api/oathnet.
+    """
+    lic = (x_license or "").strip()
+    if not lic:
         raise HTTPException(status_code=401, detail="Missing license")
-    if x_license not in ACTIVE_LICENSES:
-        raise HTTPException(status_code=401, detail="Invalid or revoked license")
-    if x_license in BANNED_LICENSES:
-        raise HTTPException(status_code=403, detail="License is banned")
+
+    if lic in BANNED_LICENSES:
+        raise HTTPException(status_code=401, detail="License is banned")
+
+    if lic not in ACTIVE_LICENSES:
+        raise HTTPException(status_code=401, detail="License is not active")
 
     user = _validate_username(x_user)
     user_l = user.lower()
 
     if user_l in BANNED_USERS:
-        raise HTTPException(status_code=403, detail="User is banned")
-    if (x_license, user_l) in BANNED_PAIRS:
-        raise HTTPException(status_code=403, detail="User is banned for this license")
+        raise HTTPException(status_code=401, detail="User is banned")
 
-    return x_license, user
+    if (lic, user_l) in BANNED_PAIRS:
+        raise HTTPException(status_code=401, detail="User+license is banned")
 
+    return lic, user
 
 def _rate_limit(license_key: str, user: str) -> None:
     now = time.time()
@@ -107,22 +111,17 @@ def _rate_limit(license_key: str, user: str) -> None:
     timestamps.append(now)
     _rate[key] = timestamps
 
-
 def _log_request(license_key: str, user: str, endpoint: str, client_ip: Optional[str]) -> None:
-    
     print(f"[VEXZY] user={user} lic={license_key} ip={client_ip} endpoint={endpoint}")
 
 
 @app.get("/")
 def root():
-  
     return {"ok": True, "service": "vexzy-proxy"}
-
 
 @app.get("/health")
 def health():
     return {"ok": True}
-
 
 @app.get("/config")
 def config_info():
@@ -143,9 +142,9 @@ def config_info():
 
 @app.post("/auth/verify")
 def auth_verify(x_license: str = Header(default=""), x_user: str = Header(default="")):
-    _check_auth(x_license, x_user)
-    return {"ok": True, "user": x_user}
-
+    lic, user = _auth_or_401(x_license, x_user)
+    
+    return {"ok": True, "user": user, "license": lic}
 
 
 @app.get("/admin/status")
@@ -159,13 +158,10 @@ def admin_status(x_admin_key: str = Header(default="")):
         "banned_pairs": [f"{lic}:{usr}" for (lic, usr) in list(BANNED_PAIRS)][:200],
     }
 
-
 @app.get("/admin/licenses")
 def admin_list_licenses(x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
-  
     return {"ok": True, "active_licenses": sorted(list(ACTIVE_LICENSES))}
-
 
 @app.get("/admin/usage")
 def admin_usage(x_admin_key: str = Header(default=""), limit: int = 50):
@@ -173,7 +169,6 @@ def admin_usage(x_admin_key: str = Header(default=""), limit: int = 50):
     limit = max(1, min(limit, 200))
     items = list(USAGE_LOG)[:limit]
     return {"ok": True, "items": items}
-
 
 @app.post("/admin/add-license")
 def admin_add_license(license_key: str, x_admin_key: str = Header(default="")):
@@ -184,7 +179,6 @@ def admin_add_license(license_key: str, x_admin_key: str = Header(default="")):
     ACTIVE_LICENSES.add(k)
     return {"ok": True, "added_license": k}
 
-
 @app.post("/admin/remove-license")
 def admin_remove_license(license_key: str, x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
@@ -192,12 +186,13 @@ def admin_remove_license(license_key: str, x_admin_key: str = Header(default="")
     if not k:
         raise HTTPException(status_code=400, detail="license_key is required")
     ACTIVE_LICENSES.discard(k)
+
     
     to_remove = {(lic, usr) for (lic, usr) in BANNED_PAIRS if lic == k}
     for item in to_remove:
         BANNED_PAIRS.discard(item)
-    return {"ok": True, "removed_license": k}
 
+    return {"ok": True, "removed_license": k}
 
 @app.post("/admin/ban-user")
 def admin_ban_user(user: str, x_admin_key: str = Header(default="")):
@@ -206,14 +201,12 @@ def admin_ban_user(user: str, x_admin_key: str = Header(default="")):
     BANNED_USERS.add(u)
     return {"ok": True, "banned_user": u}
 
-
 @app.post("/admin/unban-user")
 def admin_unban_user(user: str, x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
     u = (user or "").strip().lower()
     BANNED_USERS.discard(u)
     return {"ok": True, "unbanned_user": u}
-
 
 @app.post("/admin/ban-license")
 def admin_ban_license(license_key: str, x_admin_key: str = Header(default="")):
@@ -224,14 +217,12 @@ def admin_ban_license(license_key: str, x_admin_key: str = Header(default="")):
     BANNED_LICENSES.add(k)
     return {"ok": True, "banned_license": k}
 
-
 @app.post("/admin/unban-license")
 def admin_unban_license(license_key: str, x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
     k = (license_key or "").strip()
     BANNED_LICENSES.discard(k)
     return {"ok": True, "unbanned_license": k}
-
 
 @app.post("/admin/ban-pair")
 def admin_ban_pair(license_key: str, user: str, x_admin_key: str = Header(default="")):
@@ -243,7 +234,6 @@ def admin_ban_pair(license_key: str, user: str, x_admin_key: str = Header(defaul
     BANNED_PAIRS.add((k, u))
     return {"ok": True, "banned_pair": f"{k}:{u}"}
 
-
 @app.post("/admin/unban-pair")
 def admin_unban_pair(license_key: str, user: str, x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
@@ -253,7 +243,6 @@ def admin_unban_pair(license_key: str, user: str, x_admin_key: str = Header(defa
     return {"ok": True, "unbanned_pair": f"{k}:{u}"}
 
 
-
 @app.post("/api/oathnet")
 def oathnet_proxy(
     payload: Dict[str, Any],
@@ -261,7 +250,7 @@ def oathnet_proxy(
     x_license: str = Header(default=""),
     x_user: str = Header(default=""),
 ):
-    lic, user = _check_auth(x_license, x_user)
+    lic, user = _auth_or_401(x_license, x_user)
     _rate_limit(lic, user)
 
     endpoint = payload.get("endpoint")
@@ -279,7 +268,6 @@ def oathnet_proxy(
     client_ip = request.client.host if request.client else None
     _log_request(lic, user, endpoint, client_ip)
 
-   
     USAGE_LOG.appendleft({
         "ts": time.time(),
         "user": user,
@@ -304,4 +292,3 @@ def oathnet_proxy(
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
-

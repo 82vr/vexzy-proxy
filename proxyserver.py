@@ -9,9 +9,7 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Vexzy Proxy", version="3.0.0")
 
-# ============================================================
-# ENV
-# ============================================================
+
 OATHNET_API_KEY = os.getenv("OATHNET_API_KEY")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 OATHNET_BASE_URL = os.getenv("OATHNET_BASE_URL", "https://oathnet.org/api/service")
@@ -19,7 +17,7 @@ OATHNET_BASE_URL = os.getenv("OATHNET_BASE_URL", "https://oathnet.org/api/servic
 WINDOW_SECONDS = int(os.getenv("RL_WINDOW_SECONDS", "60"))
 MAX_REQUESTS = int(os.getenv("RL_MAX_REQUESTS", "30"))
 
-# Upstash Redis (REST)
+
 UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
@@ -30,33 +28,35 @@ if not ADMIN_API_KEY:
 if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
     raise RuntimeError("Missing UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN env vars.")
 
-# Optional: seed licenses into Redis on first run
+
 SEED_LICENSES = {k.strip() for k in os.getenv("APP_LICENSE_KEYS", "").split(",") if k.strip()}
 
-# ============================================================
-# ALLOWLIST
-# ============================================================
+
 ALLOWLIST = {
-    # ---- ADD YOUR ENDPOINTS BELOW THIS LINE ----
     "/steam/",
-    # "/roblox-userinfo/",
-    # "/ip-info/",
-    # "/holehe/",
-    # "/ghunt/",
-    # ---- ADD YOUR ENDPOINTS ABOVE THIS LINE ----
+    "/roblox-userinfo/",
+    "/search/status/<uuid:search_id>/",
+    "/search-stealer/",
+    "/search-breach/",
+    "/extract-subdomain/",
+    "/ip-info/",
+    "/holehe/",
+    "/ghunt/",
+    "/roblox-userinfo/",
+    "/discord-to-roblox/",
+    "/xbox/",
+    "/mc-history/",
+    "/discord-userinfo/",
+    "/discord-username-history/",
 }
 
-# ============================================================
-# KEYS (Redis sets)
-# ============================================================
+
 K_LICENSES = "vexzy:licenses"
 K_BANNED_USERS = "vexzy:banned_users"
 K_BANNED_LICENSES = "vexzy:banned_licenses"
-K_BANNED_PAIRS = "vexzy:banned_pairs"  # store "license:user"
+K_BANNED_PAIRS = "vexzy:banned_pairs"  
 
-# ============================================================
-# Runtime (in-memory only)
-# ============================================================
+
 USAGE_LOG = deque(maxlen=500)
 _rate: Dict[Tuple[str, str], List[float]] = {}
 
@@ -81,7 +81,7 @@ def _redis_request(cmd: str, args: List[str]) -> Any:
 
 def redis_sismember(key: str, member: str) -> bool:
     res = _redis_request("SISMEMBER", [key, member])
-    # Upstash returns {"result": 0/1}
+  
     return bool(res.get("result", 0))
 
 def redis_sadd(key: str, member: str) -> None:
@@ -116,11 +116,11 @@ def _auth_or_401(x_license: str, x_user: str) -> Tuple[str, str]:
     user = _validate_username(x_user)
     user_l = user.lower()
 
-    # license active?
+    
     if not redis_sismember(K_LICENSES, lic):
         raise HTTPException(status_code=401, detail="License is not active")
 
-    # bans?
+    
     if redis_sismember(K_BANNED_LICENSES, lic):
         raise HTTPException(status_code=401, detail="License is banned")
 
@@ -146,13 +146,10 @@ def _rate_limit(license_key: str, user: str) -> None:
 def _log_request(license_key: str, user: str, endpoint: str, client_ip: Optional[str]) -> None:
     print(f"[VEXZY] user={user} lic={license_key} ip={client_ip} endpoint={endpoint}")
 
-# ============================================================
-# Seed licenses once (best-effort)
-# ============================================================
+
 @app.on_event("startup")
 def seed_licenses():
-    # If Redis already has licenses, do nothing.
-    # If empty and you provided APP_LICENSE_KEYS, seed them.
+  
     existing = redis_smembers(K_LICENSES)
     if existing:
         print(f"[SEED] Redis already has {len(existing)} license(s).")
@@ -164,9 +161,7 @@ def seed_licenses():
         redis_sadd(K_LICENSES, k)
     print(f"[SEED] Seeded {len(SEED_LICENSES)} license(s) into Redis.")
 
-# ============================================================
-# Basic endpoints
-# ============================================================
+
 @app.get("/")
 def root():
     return {"ok": True, "service": "vexzy-proxy"}
@@ -180,9 +175,7 @@ def auth_verify(x_license: str = Header(default=""), x_user: str = Header(defaul
     lic, user = _auth_or_401(x_license, x_user)
     return {"ok": True, "user": user, "license": lic}
 
-# ============================================================
-# Admin endpoints (persistent via Redis)
-# ============================================================
+
 @app.get("/admin/status")
 def admin_status(x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
@@ -275,9 +268,7 @@ def admin_usage(x_admin_key: str = Header(default=""), limit: int = 50):
     items = list(USAGE_LOG)[:limit]
     return {"ok": True, "items": items}
 
-# ============================================================
-# Proxy endpoint
-# ============================================================
+
 @app.post("/api/oathnet")
 def oathnet_proxy(
     payload: Dict[str, Any],
@@ -327,3 +318,4 @@ def oathnet_proxy(
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
+

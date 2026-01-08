@@ -1,12 +1,13 @@
 import os
 import time
 from typing import Dict, Any, List, Tuple, Optional
+from collections import deque
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Vexzy Proxy", version="2.0.0")
+app = FastAPI(title="Vexzy Proxy", version="2.1.0")
 
 
 OATHNET_API_KEY = os.getenv("OATHNET_API_KEY")
@@ -22,7 +23,6 @@ if not OATHNET_API_KEY:
 if not ADMIN_API_KEY:
     raise RuntimeError("Missing ADMIN_API_KEY environment variable.")
 
-
 STARTUP_LICENSES = {k.strip() for k in APP_LICENSE_KEYS.split(",") if k.strip()}
 if not STARTUP_LICENSES:
     raise RuntimeError("Missing APP_LICENSE_KEYS environment variable (must contain at least 1 license key).")
@@ -30,25 +30,19 @@ if not STARTUP_LICENSES:
 
 ACTIVE_LICENSES = set(STARTUP_LICENSES)
 BANNED_USERS = set()       
-BANNED_LICENSES = set()    
+BANNED_LICENSES = set()   
 BANNED_PAIRS = set()       
+
+
+USAGE_LOG = deque(maxlen=500) 
 
 
 ALLOWLIST = {
     "/steam/",
-    "/search/status/<uuid:search_id>/",
-    "/search-stealer/",
-    "/search-breach/",
-    "/extract-subdomain/",
+    "/roblox-userinfo/",
     "/ip-info/",
     "/holehe/",
-    "/ghunt/",
-    "/roblox-userinfo/",
-    "/discord-to-roblox/",
-    "/xbox/",
-    "/mc-history/",
-    "/discord-userinfo/",
-    "/discord-username-history/",
+   
 }
 
 
@@ -105,11 +99,13 @@ def _rate_limit(license_key: str, user: str) -> None:
 
 
 def _log_request(license_key: str, user: str, endpoint: str, client_ip: Optional[str]) -> None:
+    
     print(f"[VEXZY] user={user} lic={license_key} ip={client_ip} endpoint={endpoint}")
 
 
 @app.get("/")
 def root():
+  
     return {"ok": True, "service": "vexzy-proxy"}
 
 
@@ -130,6 +126,7 @@ def config_info():
             "banned_users": len(BANNED_USERS),
             "banned_licenses": len(BANNED_LICENSES),
             "banned_pairs": len(BANNED_PAIRS),
+            "usage_log_size": len(USAGE_LOG),
         },
     }
 
@@ -144,7 +141,6 @@ def auth_verify(x_license: str = Header(default=""), x_user: str = Header(defaul
 @app.get("/admin/status")
 def admin_status(x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
- 
     return {
         "ok": True,
         "active_licenses_count": len(ACTIVE_LICENSES),
@@ -152,6 +148,21 @@ def admin_status(x_admin_key: str = Header(default="")):
         "banned_licenses": sorted(list(BANNED_LICENSES))[:200],
         "banned_pairs": [f"{lic}:{usr}" for (lic, usr) in list(BANNED_PAIRS)][:200],
     }
+
+
+@app.get("/admin/licenses")
+def admin_list_licenses(x_admin_key: str = Header(default="")):
+    _require_admin(x_admin_key)
+  
+    return {"ok": True, "active_licenses": sorted(list(ACTIVE_LICENSES))}
+
+
+@app.get("/admin/usage")
+def admin_usage(x_admin_key: str = Header(default=""), limit: int = 50):
+    _require_admin(x_admin_key)
+    limit = max(1, min(limit, 200))
+    items = list(USAGE_LOG)[:limit]
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/add-license")
@@ -171,7 +182,7 @@ def admin_remove_license(license_key: str, x_admin_key: str = Header(default="")
     if not k:
         raise HTTPException(status_code=400, detail="license_key is required")
     ACTIVE_LICENSES.discard(k)
-  
+    
     to_remove = {(lic, usr) for (lic, usr) in BANNED_PAIRS if lic == k}
     for item in to_remove:
         BANNED_PAIRS.discard(item)
@@ -258,6 +269,15 @@ def oathnet_proxy(
     client_ip = request.client.host if request.client else None
     _log_request(lic, user, endpoint, client_ip)
 
+   
+    USAGE_LOG.appendleft({
+        "ts": time.time(),
+        "user": user,
+        "license": lic,
+        "ip": client_ip,
+        "endpoint": endpoint
+    })
+
     url = f"{OATHNET_BASE_URL}{endpoint}"
 
     try:
@@ -274,4 +294,3 @@ def oathnet_proxy(
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
-

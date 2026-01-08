@@ -10,26 +10,28 @@ from fastapi.responses import JSONResponse
 app = FastAPI(title="Vexzy Proxy", version="3.0.0")
 
 
-OATHNET_API_KEY = os.getenv("OATHNET_API_KEY")
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
-OATHNET_BASE_URL = os.getenv("OATHNET_BASE_URL", "https://oathnet.org/api/service")
+OATHNET_API_KEY = (os.getenv("OATHNET_API_KEY") or "").strip().strip('"').strip("'")
+ADMIN_API_KEY = (os.getenv("ADMIN_API_KEY") or "").strip().strip('"').strip("'")
+OATHNET_BASE_URL = (os.getenv("OATHNET_BASE_URL") or "https://oathnet.org/api/service").strip().strip('"').strip("'")
 
 WINDOW_SECONDS = int(os.getenv("RL_WINDOW_SECONDS", "60"))
 MAX_REQUESTS = int(os.getenv("RL_MAX_REQUESTS", "30"))
 
 
-UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
-UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip().strip('"').strip("'")
+UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip().strip('"').strip("'")
+
+
+SEED_LICENSES = {k.strip() for k in (os.getenv("APP_LICENSE_KEYS", "")).split(",") if k.strip()}
 
 if not OATHNET_API_KEY:
     raise RuntimeError("Missing OATHNET_API_KEY environment variable.")
 if not ADMIN_API_KEY:
     raise RuntimeError("Missing ADMIN_API_KEY environment variable.")
 if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
-    raise RuntimeError("Missing UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN env vars.")
-
-
-SEED_LICENSES = {k.strip() for k in os.getenv("APP_LICENSE_KEYS", "").split(",") if k.strip()}
+    raise RuntimeError("Missing UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN environment variables.")
+if not UPSTASH_REDIS_REST_URL.startswith("https://"):
+    raise RuntimeError("UPSTASH_REDIS_REST_URL must start with https:// (use Upstash REST URL).")
 
 
 ALLOWLIST = {
@@ -51,23 +53,23 @@ ALLOWLIST = {
 }
 
 
-K_LICENSES = "vexzy:licenses"
-K_BANNED_USERS = "vexzy:banned_users"
-K_BANNED_LICENSES = "vexzy:banned_licenses"
-K_BANNED_PAIRS = "vexzy:banned_pairs"  
+K_LICENSES = "vexzy:licenses"          
+K_BANNED_USERS = "vexzy:banned_users"  
+K_BANNED_LICENSES = "vexzy:banned_licenses" 
+K_BANNED_PAIRS = "vexzy:banned_pairs"   
 
 
 USAGE_LOG = deque(maxlen=500)
 _rate: Dict[Tuple[str, str], List[float]] = {}
 
+
 def _redis_request(cmd: str, args: List[str]) -> Any:
-    """
-    Calls Upstash REST: POST /{cmd}/{arg1}/{arg2}...
-    Returns decoded JSON (Upstash format).
-    """
-    url = UPSTASH_REDIS_REST_URL.rstrip("/") + f"/{cmd}"
+    base = UPSTASH_REDIS_REST_URL.rstrip("/").strip().strip('"').strip("'")
+    url = f"{base}/{cmd}"
+
     for a in args:
         url += "/" + requests.utils.quote(str(a), safe="")
+
     try:
         r = requests.post(
             url,
@@ -81,7 +83,6 @@ def _redis_request(cmd: str, args: List[str]) -> Any:
 
 def redis_sismember(key: str, member: str) -> bool:
     res = _redis_request("SISMEMBER", [key, member])
-  
     return bool(res.get("result", 0))
 
 def redis_sadd(key: str, member: str) -> None:
@@ -94,8 +95,9 @@ def redis_smembers(key: str) -> List[str]:
     res = _redis_request("SMEMBERS", [key])
     return res.get("result") or []
 
+
 def _require_admin(x_admin_key: str) -> None:
-    if x_admin_key != ADMIN_API_KEY:
+    if (x_admin_key or "").strip() != ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized admin")
 
 def _validate_username(username: str) -> str:
@@ -105,7 +107,10 @@ def _validate_username(username: str) -> str:
 
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
     if any(c not in allowed for c in u):
-        raise HTTPException(status_code=401, detail="Username contains invalid characters (use a-z A-Z 0-9 . _ -)")
+        raise HTTPException(
+            status_code=401,
+            detail="Username contains invalid characters (use a-z A-Z 0-9 . _ -)",
+        )
     return u
 
 def _auth_or_401(x_license: str, x_user: str) -> Tuple[str, str]:
@@ -116,19 +121,16 @@ def _auth_or_401(x_license: str, x_user: str) -> Tuple[str, str]:
     user = _validate_username(x_user)
     user_l = user.lower()
 
-    
     if not redis_sismember(K_LICENSES, lic):
         raise HTTPException(status_code=401, detail="License is not active")
 
-    
     if redis_sismember(K_BANNED_LICENSES, lic):
         raise HTTPException(status_code=401, detail="License is banned")
 
     if redis_sismember(K_BANNED_USERS, user_l):
         raise HTTPException(status_code=401, detail="User is banned")
 
-    pair_key = f"{lic}:{user_l}"
-    if redis_sismember(K_BANNED_PAIRS, pair_key):
+    if redis_sismember(K_BANNED_PAIRS, f"{lic}:{user_l}"):
         raise HTTPException(status_code=401, detail="User+license is banned")
 
     return lic, user
@@ -149,7 +151,6 @@ def _log_request(license_key: str, user: str, endpoint: str, client_ip: Optional
 
 @app.on_event("startup")
 def seed_licenses():
-  
     existing = redis_smembers(K_LICENSES)
     if existing:
         print(f"[SEED] Redis already has {len(existing)} license(s).")
@@ -170,6 +171,17 @@ def root():
 def health():
     return {"ok": True}
 
+@app.get("/config")
+def config_info():
+    return {
+        "ok": True,
+        "base_url": OATHNET_BASE_URL,
+        "allowlist_count": len(ALLOWLIST),
+        "rate_limit": {"max_requests": MAX_REQUESTS, "window_seconds": WINDOW_SECONDS},
+        "runtime": {"usage_log_size": len(USAGE_LOG)},
+        "storage": "upstash-redis",
+    }
+
 @app.post("/auth/verify")
 def auth_verify(x_license: str = Header(default=""), x_user: str = Header(default="")):
     lic, user = _auth_or_401(x_license, x_user)
@@ -181,7 +193,7 @@ def admin_status(x_admin_key: str = Header(default="")):
     _require_admin(x_admin_key)
     return {
         "ok": True,
-        "licenses_count": len(redis_smembers(K_LICENSES)),
+        "active_licenses_count": len(redis_smembers(K_LICENSES)),
         "banned_users_count": len(redis_smembers(K_BANNED_USERS)),
         "banned_licenses_count": len(redis_smembers(K_BANNED_LICENSES)),
         "banned_pairs_count": len(redis_smembers(K_BANNED_PAIRS)),
@@ -318,4 +330,3 @@ def oathnet_proxy(
         return JSONResponse(status_code=r.status_code, content=r.json())
     except ValueError:
         return JSONResponse(status_code=r.status_code, content={"raw": r.text})
-
